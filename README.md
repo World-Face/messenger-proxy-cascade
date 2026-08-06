@@ -43,6 +43,18 @@ curl -sSL https://raw.githubusercontent.com/World-Face/messenger-proxy-cascade/m
 
 В конце входной установщик прогоняет сквозную проверку: запрашивает внешний IP через каскад и сверяет с адресом выходного сервера. Совпало — цепочка рабочая.
 
+### Без интерактива
+
+Любой вопрос можно ответить заранее через переменную окружения — установщик спросит только то, чего не хватает. Удобно для автоматизации:
+
+```bash
+EXIT_IP=1.2.3.4 ENTRY_IP=5.6.7.8 WA_DOMAIN=whatsapp.example.com TG_DOMAIN=telegram.example.com AUTO_CONFIRM=y bash install.sh exit
+```
+
+```bash
+TOKEN=<токен_с_выходного> AUTO_CONFIRM=y bash install.sh entry
+```
+
 ## Параметры
 
 | Что | По умолчанию |

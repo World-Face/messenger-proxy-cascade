@@ -22,7 +22,28 @@ XRAY_DIR="${STATE_DIR}/xray"
 LP_CHAT=20443; LP_MEDIA=20777; LP_TG=20943; LP_PROBE=10808
 
 [[ $EUID -ne 0 ]] && err "Запустите скрипт от root: sudo bash install.sh"
-[[ ! -t 0 ]] && exec < /dev/tty
+
+# Если скрипт пришёл по конвейеру (bash <(curl ...)), забираем ввод с терминала.
+# Терминала может не быть вовсе — тогда работаем на переменных окружения.
+if [[ ! -t 0 ]] && (exec < /dev/tty) 2>/dev/null; then exec < /dev/tty; fi
+
+# ask ИМЯ_ПЕРЕМЕННОЙ "вопрос" [значение по умолчанию]
+# Уже заданная переменная окружения выигрывает — так ставится без интерактива.
+ask() {
+  local n="$1" p="$2" d="${3:-}" v
+  if [[ -n "${!n:-}" ]]; then
+    info "${p}: ${!n}"
+    return
+  fi
+  read -rp "  ${p}${d:+ [$d]}: " v
+  printf -v "$n" '%s' "${v:-$d}"
+}
+
+confirm() {
+  [[ "${AUTO_CONFIRM:-}" == "y" ]] && return 0
+  local c; read -rp "  Продолжить? (y/n): " c
+  [[ "$c" =~ ^[yY]$ ]] || { echo "  Отменено."; exit 0; }
+}
 
 # ══════════════════════════════════════════════════════════════
 #  Общее
@@ -158,27 +179,24 @@ install_exit() {
 
   local guess
   guess=$(curl -s4 --max-time 10 https://api.ipify.org || true)
-  read -rp "  Публичный IP этого (выходного) сервера [${guess}]: " x
-  EXIT_IP=${x:-$guess}
-  [[ $EXIT_IP =~ ^[0-9.]+$ ]] || err "Некорректный IP"
-
-  read -rp "  Публичный IP входного сервера (RU): " ENTRY_IP
-  [[ $ENTRY_IP =~ ^[0-9.]+$ ]] || err "Некорректный IP"
+  ask EXIT_IP  "Публичный IP этого (выходного) сервера" "$guess"
+  ask ENTRY_IP "Публичный IP входного сервера (RU)"
+  [[ $EXIT_IP  =~ ^[0-9.]+$ ]] || err "Некорректный IP выходного сервера"
+  [[ $ENTRY_IP =~ ^[0-9.]+$ ]] || err "Некорректный IP входного сервера"
 
   echo ""
   echo -e "  ${CYAN}── WhatsApp ──${NC}"
-  read -rp "  Домен WhatsApp (напр. whatsapp.example.com): " WA_DOMAIN
-  read -rp "  Порт Chat [8443]: " WA_CHAT_PORT;   WA_CHAT_PORT=${WA_CHAT_PORT:-8443}
-  read -rp "  Порт Media [7777]: " WA_MEDIA_PORT; WA_MEDIA_PORT=${WA_MEDIA_PORT:-7777}
+  ask WA_DOMAIN     "Домен WhatsApp (напр. whatsapp.example.com)"
+  ask WA_CHAT_PORT  "Порт Chat"  8443
+  ask WA_MEDIA_PORT "Порт Media" 7777
   echo ""
   echo -e "  ${CYAN}── Telegram MTProto ──${NC}"
-  read -rp "  Домен Telegram (напр. telegram.example.com): " TG_DOMAIN
-  read -rp "  Порт [9443]: " TG_PORT; TG_PORT=${TG_PORT:-9443}
+  ask TG_DOMAIN "Домен Telegram (напр. telegram.example.com)"
+  ask TG_PORT   "Порт" 9443
   echo ""
   echo -e "  ${CYAN}── Транспорт каскада (VLESS + REALITY) ──${NC}"
-  read -rp "  Порт REALITY [443]: " XRAY_PORT; XRAY_PORT=${XRAY_PORT:-443}
-  read -rp "  Маскировочный домен (SNI) [www.microsoft.com]: " SNI
-  SNI=${SNI:-www.microsoft.com}
+  ask XRAY_PORT "Порт REALITY" 443
+  ask SNI       "Маскировочный домен (SNI)" www.microsoft.com
 
   echo ""
   echo -e "${BOLD}  ┌──────────────────────────────────────────────┐${NC}"
@@ -189,8 +207,7 @@ install_exit() {
   printf "  │  %-20s %-21s│\n" "Telegram:"         "$TG_DOMAIN:$TG_PORT"
   printf "  │  %-20s %-21s│\n" "REALITY:"          ":$XRAY_PORT ($SNI)"
   echo -e "${BOLD}  └──────────────────────────────────────────────┘${NC}"
-  read -rp "  Продолжить? (y/n): " c
-  [[ "$c" =~ ^[yY]$ ]] || { echo "  Отменено."; exit 0; }
+  confirm
 
   step "1/7" "Системные зависимости"
   base_deps; tune_sysctl; ok "Зависимости установлены"
@@ -399,8 +416,8 @@ EOF
 install_entry() {
   echo -e "\n${YELLOW}${BOLD}  Настройка ВХОДНОГО сервера (RU)${NC}\n"
   echo "  Вставьте токен, полученный при установке выходного сервера:"
-  read -rp "  Токен: " TOKEN
-  [[ -n "$TOKEN" ]] || err "Токен не введён"
+  ask TOKEN "Токен"
+  [[ -n "${TOKEN:-}" ]] || err "Токен не введён"
 
   local decoded line k v
   decoded=$(echo "$TOKEN" | base64 -d 2>/dev/null) || err "Токен повреждён"
@@ -425,8 +442,7 @@ install_entry() {
   printf "  │  %-20s %-21s│\n" "  chat / media:" ":$WA_CHAT_PORT / :$WA_MEDIA_PORT"
   printf "  │  %-20s %-21s│\n" "Telegram:"       "$TG_DOMAIN:$TG_PORT"
   echo -e "${BOLD}  └──────────────────────────────────────────────┘${NC}"
-  read -rp "  Продолжить? (y/n): " c
-  [[ "$c" =~ ^[yY]$ ]] || { echo "  Отменено."; exit 0; }
+  confirm
 
   step "1/5" "Системные зависимости"
   base_deps; tune_sysctl; ok "Зависимости установлены"
