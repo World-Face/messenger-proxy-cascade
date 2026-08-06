@@ -1,6 +1,6 @@
 #!/bin/bash
 # ╔══════════════════════════════════════════════════════════════╗
-# ║      Messenger Proxy Cascade — RU (вход) → PL (выход)        ║
+# ║   Messenger Proxy Cascade — вход (РФ) → выход (зарубеж)      ║
 # ║      WhatsApp + Telegram MTProto                             ║
 # ║      Транспорт между серверами: Xray VLESS + REALITY (TCP)   ║
 # ║      https://github.com/World-Face/messenger-proxy-cascade   ║
@@ -172,15 +172,15 @@ EOM
 }
 
 # ══════════════════════════════════════════════════════════════
-#  ВЫХОДНОЙ СЕРВЕР (PL) — реальный прокси + приёмник VLESS
+#  ВЫХОДНОЙ СЕРВЕР (зарубеж) — реальный прокси + приёмник VLESS
 # ══════════════════════════════════════════════════════════════
 install_exit() {
-  echo -e "\n${YELLOW}${BOLD}  Настройка ВЫХОДНОГО сервера (PL)${NC}\n"
+  echo -e "\n${YELLOW}${BOLD}  Настройка ВЫХОДНОГО (зарубежного) сервера${NC}\n"
 
   local guess
   guess=$(curl -s4 --max-time 10 https://api.ipify.org || true)
   ask EXIT_IP  "Публичный IP этого (выходного) сервера" "$guess"
-  ask ENTRY_IP "Публичный IP входного сервера (RU)"
+  ask ENTRY_IP "Публичный IP входного сервера (РФ)"
   [[ $EXIT_IP  =~ ^[0-9.]+$ ]] || err "Некорректный IP выходного сервера"
   [[ $ENTRY_IP =~ ^[0-9.]+$ ]] || err "Некорректный IP входного сервера"
 
@@ -196,12 +196,12 @@ install_exit() {
   echo ""
   echo -e "  ${CYAN}── Транспорт каскада (VLESS + REALITY) ──${NC}"
   ask XRAY_PORT "Порт REALITY" 443
-  ask SNI       "Маскировочный домен (SNI)" www.microsoft.com
+  ask SNI       "Маскировочный домен (SNI)" vk.ru
 
   echo ""
   echo -e "${BOLD}  ┌──────────────────────────────────────────────┐${NC}"
-  printf "  │  %-20s %-21s│\n" "Выход (этот, PL):" "$EXIT_IP"
-  printf "  │  %-20s %-21s│\n" "Вход (RU):"        "$ENTRY_IP"
+  printf "  │  %-20s %-21s│\n" "Выход (этот сервер):" "$EXIT_IP"
+  printf "  │  %-20s %-21s│\n" "Вход (РФ):"        "$ENTRY_IP"
   printf "  │  %-20s %-21s│\n" "WhatsApp:"         "$WA_DOMAIN"
   printf "  │  %-20s %-21s│\n" "  chat / media:"   ":$WA_CHAT_PORT / :$WA_MEDIA_PORT"
   printf "  │  %-20s %-21s│\n" "Telegram:"         "$TG_DOMAIN:$TG_PORT"
@@ -398,7 +398,7 @@ EOF
 
   echo ""
   echo -e "${BOLD}${GREEN}  ╔════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}${GREEN}  ║          Выходной сервер (PL) готов                        ║${NC}"
+  echo -e "${BOLD}${GREEN}  ║          Выходной сервер готов                             ║${NC}"
   echo -e "${BOLD}${GREEN}  ╚════════════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo -e "${BOLD}  Токен для входного сервера (RU) — скопируйте целиком:${NC}"
@@ -406,15 +406,15 @@ EOF
   echo -e "${CYAN}${TOKEN}${NC}"
   echo ""
   echo "  Копия: ${STATE_DIR}/join-token.txt"
-  echo -e "  Дальше на RU-сервере:  ${CYAN}bash install.sh entry${NC}"
+  echo -e "  Дальше на входном сервере:  ${CYAN}bash install.sh entry${NC}"
   echo ""
 }
 
 # ══════════════════════════════════════════════════════════════
-#  ВХОДНОЙ СЕРВЕР (RU) — приём клиентов, отправка в VLESS
+#  ВХОДНОЙ СЕРВЕР (РФ) — приём клиентов, отправка в VLESS
 # ══════════════════════════════════════════════════════════════
 install_entry() {
-  echo -e "\n${YELLOW}${BOLD}  Настройка ВХОДНОГО сервера (RU)${NC}\n"
+  echo -e "\n${YELLOW}${BOLD}  Настройка ВХОДНОГО (российского) сервера${NC}\n"
   echo "  Вставьте токен, полученный при установке выходного сервера:"
   ask TOKEN "Токен"
   [[ -n "${TOKEN:-}" ]] || err "Токен не введён"
@@ -436,7 +436,7 @@ install_entry() {
 
   echo ""
   echo -e "${BOLD}  ┌──────────────────────────────────────────────┐${NC}"
-  printf "  │  %-20s %-21s│\n" "Выход (PL):"     "$EXIT_IP:$XRAY_PORT"
+  printf "  │  %-20s %-21s│\n" "Выход (зарубеж):" "$EXIT_IP:$XRAY_PORT"
   printf "  │  %-20s %-21s│\n" "Маскировка SNI:" "$SNI"
   printf "  │  %-20s %-21s│\n" "WhatsApp:"       "$WA_DOMAIN"
   printf "  │  %-20s %-21s│\n" "  chat / media:" ":$WA_CHAT_PORT / :$WA_MEDIA_PORT"
@@ -584,7 +584,7 @@ EOF
 
   echo ""
   echo -e "${BOLD}${GREEN}  ╔════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}${GREEN}  ║                  Каскад RU → PL запущен                    ║${NC}"
+  echo -e "${BOLD}${GREEN}  ║                     Каскад запущен                         ║${NC}"
   echo -e "${BOLD}${GREEN}  ╚════════════════════════════════════════════════════════════╝${NC}"
   echo ""
   if [[ "$CASCADE_IP" == "$EXIT_IP" ]]; then
@@ -612,7 +612,7 @@ EOF
 clear
 echo -e "${BLUE}${BOLD}"
 echo "  ╔══════════════════════════════════════════════╗"
-echo "  ║      Messenger Proxy — каскад RU → PL        ║"
+echo "  ║   Messenger Proxy — каскадный прокси         ║"
 echo "  ║      WhatsApp  +  Telegram MTProto           ║"
 echo "  ║      Транспорт: VLESS + REALITY              ║"
 echo "  ╚══════════════════════════════════════════════╝"
@@ -622,8 +622,8 @@ ROLE="${1:-}"
 if [[ -z "$ROLE" ]]; then
   echo "  Какую роль ставим на этот сервер?"
   echo ""
-  echo -e "    ${BOLD}1${NC}) ${CYAN}exit${NC}  — выходной (Польша). Ставится ПЕРВЫМ."
-  echo -e "    ${BOLD}2${NC}) ${CYAN}entry${NC} — входной (Россия). На него смотрят домены."
+  echo -e "    ${BOLD}1${NC}) ${CYAN}exit${NC}  — выходной, зарубежный. Ставится ПЕРВЫМ."
+  echo -e "    ${BOLD}2${NC}) ${CYAN}entry${NC} — входной, российский. На него смотрят домены."
   echo ""
   read -rp "  Выбор [1/2]: " a
   case "$a" in 1) ROLE=exit ;; 2) ROLE=entry ;; *) err "Неверный выбор" ;; esac

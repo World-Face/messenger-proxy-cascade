@@ -1,9 +1,9 @@
 # Messenger Proxy Cascade
 
-Каскадный прокси **WhatsApp** и **Telegram MTProto**: клиенты подключаются к серверу в России, а наружу трафик выходит с сервера в Польше. Между серверами — **Xray VLESS + REALITY**, снаружи неотличимый от обычного TLS 1.3.
+Каскадный прокси **WhatsApp** и **Telegram MTProto**: клиенты подключаются к серверу в России, а наружу трафик выходит с зарубежного сервера. Между серверами — **Xray VLESS + REALITY**, снаружи неотличимый от обычного TLS 1.3.
 
 ```
-Клиент ──► RU (вход)                          PL (выход) ──► g.whatsapp.net
+Клиент ──► вход (РФ)                        выход (зарубеж) ──► g.whatsapp.net
            haproxy :8443 ─send-proxy─┐    ┌─► haproxy 127.0.0.1:8443
            haproxy :7777 ─send-proxy─┤    ├─► haproxy 127.0.0.1:7777 ──► whatsapp.net
            haproxy :9443 ────────────┤    ├─► mtg     127.0.0.1:9443 ──► Telegram DC
@@ -16,16 +16,16 @@
 | | |
 |---|---|
 | **Домены смотрят на RU** | Российские клиенты ходят на российский IP — быстро и без блокировок на «последней миле» |
-| **Выход из Польши** | WhatsApp и Telegram видят европейский IP, к которому у них нет вопросов |
-| **REALITY между серверами** | Транзит РФ→ЕС выглядит как TLS-сессия к легитимному сайту. WireGuard/OpenVPN здесь ловятся ТСПУ по сигнатуре, REALITY — нет |
+| **Зарубежный выход** | WhatsApp и Telegram видят иностранный IP, к которому у них нет вопросов |
+| **REALITY между серверами** | Транзит РФ→заграница выглядит как TLS-сессия к легитимному сайту. WireGuard/OpenVPN здесь ловятся ТСПУ по сигнатуре, REALITY — нет |
 | **Реальный IP клиента** | PROXY-протокол проходит сквозь VLESS, поэтому Meta получает адрес клиента, а не адрес каскада |
-| **PL закрыт наружу** | Открыт единственный порт REALITY, и только для IP входного сервера. `haproxy` и `mtg` слушают `127.0.0.1` |
+| **Выход закрыт наружу** | Открыт единственный порт REALITY, и только для IP входного сервера. `haproxy` и `mtg` слушают `127.0.0.1` |
 
 ## Установка
 
 Порядок важен: сначала выходной сервер — он выдаёт токен для входного.
 
-### 1. Выходной сервер (Польша)
+### 1. Выходной сервер (зарубежный)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/World-Face/messenger-proxy-cascade/main/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh exit
@@ -33,7 +33,7 @@ curl -sSL https://raw.githubusercontent.com/World-Face/messenger-proxy-cascade/m
 
 Спросит IP обоих серверов, домены, порты и маскировочный SNI. В конце напечатает **токен** — длинную строку base64.
 
-### 2. Входной сервер (Россия)
+### 2. Входной сервер (российский)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/World-Face/messenger-proxy-cascade/main/install.sh -o /tmp/install.sh && sudo bash /tmp/install.sh entry
@@ -62,8 +62,8 @@ TOKEN=<токен_с_выходного> AUTO_CONFIRM=y bash install.sh entry
 | Порт WhatsApp Chat | `8443` |
 | Порт WhatsApp Media | `7777` |
 | Порт Telegram | `9443` |
-| Порт REALITY (RU→PL) | `443` |
-| Маскировочный SNI | `www.microsoft.com` |
+| Порт REALITY (вход→выход) | `443` |
+| Маскировочный SNI | `vk.ru` |
 
 DNS-записи обоих доменов должны указывать на **входной** (российский) сервер.
 
