@@ -49,9 +49,12 @@ confirm() {
 #  Общее
 # ══════════════════════════════════════════════════════════════
 
+# автообновления любят держать блокировку dpkg — ждём, а не падаем
+APT_OPTS=(-o DPkg::Lock::Timeout=300 -y -qq)
+
 base_deps() {
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  apt-get -o DPkg::Lock::Timeout=300 update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install "${APT_OPTS[@]}" \
     ca-certificates curl openssl unzip netcat-openbsd haproxy >/dev/null
 }
 
@@ -171,32 +174,174 @@ EOM
   ok "Сертификат для ${dns} создан"
 }
 
+resolve_ip() { getent ahostsv4 "$1" 2>/dev/null | awk 'NR==1{print $1}'; }
+
+# ── Заглушка на :443 входного сервера ─────────────────────────
+# При неверном handshake mtg проксирует соединение на fronting-домен.
+# Если там тишина — сканер получает closed вместо правдоподобного TLS.
+CAMO_PEM="/etc/haproxy/ssl/camouflage.pem"
+CAMO_HTML="/etc/haproxy/camouflage.html"
+CAMO_CERT_NAME="messenger-proxy"
+
+# http-request return появился в haproxy 2.2
+hap_has_return() {
+  local v; v=$(haproxy -v 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+  [[ -n "$v" ]] || return 1
+  awk -v v="$v" 'BEGIN{split(v,a,"."); exit !(a[1]>2 || (a[1]==2 && a[2]>=2))}'
+}
+
+try_letsencrypt() {
+  local challenge="$1"; shift
+  certbot certonly --standalone --non-interactive --agree-tos \
+    --register-unsafely-without-email --preferred-challenges "$challenge" \
+    --cert-name "$CAMO_CERT_NAME" "$@" >/dev/null 2>&1
+}
+
+build_camo_pem() {
+  local live="/etc/letsencrypt/live/${CAMO_CERT_NAME}"
+  cat "${live}/fullchain.pem" "${live}/privkey.pem" > "$CAMO_PEM"
+  chmod 600 "$CAMO_PEM"; chown haproxy:haproxy "$CAMO_PEM" 2>/dev/null || true
+}
+
+self_signed_camo() {
+  local dns="$1" d=/tmp/camo.$$
+  mkdir -p "$d"; pushd "$d" >/dev/null
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -keyout k.pem -out c.pem -subj "/CN=${dns}" \
+    -addext "subjectAltName=DNS:${dns}" 2>/dev/null
+  cat c.pem k.pem > "$CAMO_PEM"
+  chmod 600 "$CAMO_PEM"; chown haproxy:haproxy "$CAMO_PEM" 2>/dev/null || true
+  popd >/dev/null; rm -rf "$d"
+}
+
+# setup_camouflage <свой_публичный_IP> <домен...>
+setup_camouflage() {
+  local my_ip="$1"; shift
+  local d args=() dns_ok=true
+  mkdir -p /etc/haproxy/ssl
+
+  # Let's Encrypt выдаст сертификат, только если домен реально смотрит сюда
+  for d in "$@"; do
+    if [[ "$(resolve_ip "$d")" != "$my_ip" ]]; then
+      dns_ok=false
+      warn "${d} не резолвится в ${my_ip} — валидный сертификат не получить"
+    fi
+    args+=( -d "$d" )
+  done
+
+  cat > "$CAMO_HTML" <<'HTMLEOF'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Welcome</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:40rem;
+margin:20vh auto;padding:0 1.5rem;color:#333;line-height:1.6}
+h1{font-weight:500;font-size:1.5rem}</style></head>
+<body><h1>Welcome</h1><p>This site is not configured yet.</p></body></html>
+HTMLEOF
+
+  local primary="$1" method=""
+  if $dns_ok; then
+    DEBIAN_FRONTEND=noninteractive apt-get install "${APT_OPTS[@]}" certbot >/dev/null 2>&1
+    if command -v certbot >/dev/null; then
+      open_port 80 tcp
+      # HTTP-01 требует открытого :80. Если провайдер его режет, пробуем
+      # TLS-ALPN-01 по :443 — он и так открыт ради самой заглушки.
+      info "Запрашиваем сертификат Let's Encrypt (HTTP-01)..."
+      if try_letsencrypt http-01 "${args[@]}"; then
+        method=http-01
+      else
+        info "HTTP-01 не прошёл, пробуем TLS-ALPN-01 по :443..."
+        systemctl stop haproxy >/dev/null 2>&1 || true
+        try_letsencrypt tls-alpn-01 "${args[@]}" && method=tls-alpn-01
+        systemctl start haproxy >/dev/null 2>&1 || true
+      fi
+    else
+      warn "certbot не установился"
+    fi
+  fi
+
+  if [[ -n "$method" ]]; then
+    build_camo_pem
+    install_renew_hooks "$method"
+    if [[ "$method" == "tls-alpn-01" ]]; then
+      ok "Сертификат получен через TLS-ALPN-01, обновление автоматическое"
+      warn "Откройте :80 у провайдера — тогда обновление пойдёт без паузы haproxy"
+    else
+      ok "Сертификат Let's Encrypt получен (HTTP-01), обновление автоматическое"
+    fi
+    return 0
+  fi
+
+  self_signed_camo "$primary"
+  warn "Заглушка с самоподписанным сертификатом (камуфляж слабее)"
+}
+
+# install_renew_hooks <способ>
+install_renew_hooks() {
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/messenger-proxy.sh <<HOOKEOF
+#!/bin/bash
+cat /etc/letsencrypt/live/${CAMO_CERT_NAME}/fullchain.pem \\
+    /etc/letsencrypt/live/${CAMO_CERT_NAME}/privkey.pem > ${CAMO_PEM}
+chown haproxy:haproxy ${CAMO_PEM} 2>/dev/null || true
+chmod 600 ${CAMO_PEM}
+systemctl reload haproxy
+HOOKEOF
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/messenger-proxy.sh
+
+  # TLS-ALPN-01 занимает :443, поэтому haproxy на время обновления уступает порт
+  if [[ "$1" == "tls-alpn-01" ]]; then
+    mkdir -p /etc/letsencrypt/renewal-hooks/pre /etc/letsencrypt/renewal-hooks/post
+    printf '#!/bin/bash\nsystemctl stop haproxy\n'  > /etc/letsencrypt/renewal-hooks/pre/messenger-proxy.sh
+    printf '#!/bin/bash\nsystemctl start haproxy\n' > /etc/letsencrypt/renewal-hooks/post/messenger-proxy.sh
+    chmod +x /etc/letsencrypt/renewal-hooks/pre/messenger-proxy.sh \
+             /etc/letsencrypt/renewal-hooks/post/messenger-proxy.sh
+  fi
+}
+
 # ══════════════════════════════════════════════════════════════
 #  ВЫХОДНОЙ СЕРВЕР (зарубеж) — реальный прокси + приёмник VLESS
 # ══════════════════════════════════════════════════════════════
 install_exit() {
   echo -e "\n${YELLOW}${BOLD}  Настройка ВЫХОДНОГО (зарубежного) сервера${NC}\n"
 
-  local guess
-  guess=$(curl -s4 --max-time 10 https://api.ipify.org || true)
-  ask EXIT_IP  "Публичный IP этого (выходного) сервера" "$guess"
-  ask ENTRY_IP "Публичный IP входного сервера (РФ)"
+  echo -e "  ${CYAN}Домены должны быть заранее направлены на входной сервер.${NC}\n"
+  ask WA_DOMAIN "Домен WhatsApp (напр. whatsapp.example.com)"
+  ask TG_DOMAIN "Домен Telegram (напр. telegram.example.com)"
+  [[ -n "$WA_DOMAIN" && -n "$TG_DOMAIN" ]] || err "Домены обязательны"
+
+  # Свой публичный IP узнаём сами
+  if [[ -z "${EXIT_IP:-}" ]]; then
+    EXIT_IP=$(curl -s4 --max-time 10 https://api.ipify.org || true)
+    [[ $EXIT_IP =~ ^[0-9.]+$ ]] && ok "Публичный IP этого сервера: ${EXIT_IP}" \
+      || ask EXIT_IP "Не удалось определить IP. Публичный IP этого сервера"
+  fi
+
+  # IP входного сервера берём из DNS: домены и так обязаны смотреть на него
+  if [[ -z "${ENTRY_IP:-}" ]]; then
+    local ip_wa ip_tg
+    ip_wa=$(resolve_ip "$WA_DOMAIN"); ip_tg=$(resolve_ip "$TG_DOMAIN")
+    if [[ -n "$ip_wa" && "$ip_wa" == "$ip_tg" ]]; then
+      ENTRY_IP="$ip_wa"
+      ok "IP входного сервера из DNS: ${ENTRY_IP}"
+    else
+      [[ -z "$ip_wa" || -z "$ip_tg" ]] \
+        && warn "Домены не резолвятся — проверьте DNS" \
+        || warn "Домены смотрят на разные адреса: ${ip_wa} и ${ip_tg}"
+      ask ENTRY_IP "Публичный IP входного сервера"
+    fi
+  fi
   [[ $EXIT_IP  =~ ^[0-9.]+$ ]] || err "Некорректный IP выходного сервера"
   [[ $ENTRY_IP =~ ^[0-9.]+$ ]] || err "Некорректный IP входного сервера"
+  [[ "$EXIT_IP" != "$ENTRY_IP" ]] || err "Вход и выход не могут быть одним сервером"
 
-  echo ""
-  echo -e "  ${CYAN}── WhatsApp ──${NC}"
-  ask WA_DOMAIN     "Домен WhatsApp (напр. whatsapp.example.com)"
-  ask WA_CHAT_PORT  "Порт Chat"  8443
-  ask WA_MEDIA_PORT "Порт Media" 7777
-  echo ""
-  echo -e "  ${CYAN}── Telegram MTProto ──${NC}"
-  ask TG_DOMAIN "Домен Telegram (напр. telegram.example.com)"
-  ask TG_PORT   "Порт" 9443
-  echo ""
-  echo -e "  ${CYAN}── Транспорт каскада (VLESS + REALITY) ──${NC}"
-  ask XRAY_PORT "Порт REALITY" 443
-  ask SNI       "Маскировочный домен (SNI)" vk.ru
+  # Остальное имеет разумные умолчания, меняется через переменные окружения
+  WA_CHAT_PORT="${WA_CHAT_PORT:-8443}"
+  WA_MEDIA_PORT="${WA_MEDIA_PORT:-7777}"
+  TG_PORT="${TG_PORT:-9443}"
+  XRAY_PORT="${XRAY_PORT:-443}"
+  SNI="${SNI:-vk.ru}"
 
   echo ""
   echo -e "${BOLD}  ┌──────────────────────────────────────────────┐${NC}"
@@ -215,15 +360,27 @@ install_exit() {
   step "2/7" "Xray и ключи REALITY"
   install_xray
   mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
-  local xk
-  xk=$(xray x25519)
-  # у разных версий подписи строк отличаются (Private key / PrivateKey, Public key / Password)
-  REALITY_PRIV=$(echo "$xk" | sed -n '1s/^[^:]*: *//p')
-  REALITY_PUB=$(echo "$xk"  | sed -n '2s/^[^:]*: *//p')
-  [[ -n "$REALITY_PRIV" && -n "$REALITY_PUB" ]] || err "Не удалось сгенерировать ключи REALITY"
-  UUID=$(cat /proc/sys/kernel/random/uuid)
-  SHORT_ID=$(openssl rand -hex 8)
-  ok "Ключи REALITY сгенерированы"
+  local state="$STATE_DIR/state.env"
+
+  # Повторный запуск не должен ломать уже розданные клиентам ссылки:
+  # ключи и секрет переиспользуем, пока явно не попросили ROTATE=y.
+  if [[ -f "$state" && "${ROTATE:-}" != "y" ]]; then
+    # shellcheck source=/dev/null
+    . "$state"
+    ok "Ключи и секрет взяты из ${state} — прежние ссылки продолжат работать"
+    info "Нужны новые? Запустите с ROTATE=y (старые ссылки перестанут работать)"
+  else
+    [[ -f "$state" ]] && warn "ROTATE=y — все ранее выданные ссылки перестанут работать"
+    local xk
+    xk=$(xray x25519)
+    # у разных версий подписи строк отличаются (Private key / PrivateKey, Public key / Password)
+    REALITY_PRIV=$(echo "$xk" | sed -n '1s/^[^:]*: *//p')
+    REALITY_PUB=$(echo "$xk"  | sed -n '2s/^[^:]*: *//p')
+    [[ -n "$REALITY_PRIV" && -n "$REALITY_PUB" ]] || err "Не удалось сгенерировать ключи REALITY"
+    UUID=$(cat /proc/sys/kernel/random/uuid)
+    SHORT_ID=$(openssl rand -hex 8)
+    ok "Ключи REALITY сгенерированы"
+  fi
 
   step "3/7" "Конфиг Xray (приём VLESS)"
   cat > "$XRAY_DIR/config.json" <<EOF
@@ -329,7 +486,26 @@ EOF
   step "5/7" "Telegram MTProto (mtg)"
   install_mtg
   mkdir -p "$STATE_DIR/telegram"
-  TG_SECRET=$(mtg generate-secret --hex "$TG_DOMAIN")
+  # Секрет тоже переживает переустановку — иначе ломаются ссылки у клиентов.
+  # Но в него зашит домен, поэтому при смене домена перевыпускаем.
+  if [[ -n "${TG_SECRET:-}" ]]; then
+    local dom_hex; dom_hex=$(printf '%s' "$TG_DOMAIN" | od -An -tx1 | tr -d ' \n')
+    [[ "$TG_SECRET" == *"$dom_hex" ]] || {
+      warn "Домен Telegram изменился — секрет перевыпущен, ссылки надо раздать заново"
+      TG_SECRET=""
+    }
+  fi
+  [[ -n "${TG_SECRET:-}" ]] || TG_SECRET=$(mtg generate-secret --hex "$TG_DOMAIN")
+
+  umask 077
+  cat > "$STATE_DIR/state.env" <<STATEEOF
+REALITY_PRIV='${REALITY_PRIV}'
+REALITY_PUB='${REALITY_PUB}'
+UUID='${UUID}'
+SHORT_ID='${SHORT_ID}'
+TG_SECRET='${TG_SECRET}'
+STATEEOF
+  umask 022
   cat > "$STATE_DIR/telegram/config.toml" <<EOF
 secret  = "${TG_SECRET}"
 bind-to = "127.0.0.1:${TG_PORT}"
@@ -449,10 +625,10 @@ install_entry() {
   echo -e "${BOLD}  └──────────────────────────────────────────────┘${NC}"
   confirm
 
-  step "1/5" "Системные зависимости"
+  step "1/6" "Системные зависимости"
   base_deps; tune_sysctl; ok "Зависимости установлены"
 
-  step "2/5" "Xray — транспорт до выходного сервера"
+  step "2/6" "Xray — транспорт до выходного сервера"
   install_xray
   mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
   cat > "$XRAY_DIR/config.json" <<EOF
@@ -509,7 +685,29 @@ EOF
   sleep 2
   systemctl is-active --quiet xray-cascade && ok "xray-cascade запущен" || warn "xray-cascade не запустился"
 
-  step "3/5" "HAProxy — приём клиентов"
+  step "3/6" "Заглушка на :443 (камуфляж fronting-домена)"
+  MY_IP=$(curl -s4 --max-time 10 https://api.ipify.org || true)
+  [[ $MY_IP =~ ^[0-9.]+$ ]] || MY_IP=""
+  setup_camouflage "$MY_IP" "$TG_DOMAIN" "$WA_DOMAIN"
+
+  # Заглушку показываем, только если haproxy умеет http-request return (2.2+)
+  CAMO_BLOCK=""
+  if hap_has_return; then
+    CAMO_BLOCK=$(cat <<CAMOEOF
+
+# Сюда mtg отправляет соединения с неверным секретом, и сюда же попадают
+# случайные сканеры: вместо closed они получают обычный HTTPS-ответ.
+frontend fe_camouflage
+  mode http
+  bind ipv4@*:443 ssl crt ${CAMO_PEM} alpn h2,http/1.1
+  http-request return status 200 content-type "text/html" file ${CAMO_HTML}
+CAMOEOF
+)
+  else
+    warn "haproxy старее 2.2 — заглушка пропущена"
+  fi
+
+  step "4/6" "HAProxy — приём клиентов"
   cat > /etc/haproxy/haproxy.cfg <<EOF
 global
   log /dev/log local0
@@ -561,23 +759,28 @@ frontend fe_telegram
 
 backend be_telegram
   server cascade 127.0.0.1:${LP_TG} check inter 30s
+${CAMO_BLOCK}
 EOF
   haproxy -c -f /etc/haproxy/haproxy.cfg >/dev/null || err "Ошибка в конфиге HAProxy"
   systemctl enable haproxy >/dev/null 2>&1
   systemctl restart haproxy
   ok "HAProxy настроен"
 
-  step "4/5" "Firewall"
+  step "5/6" "Firewall"
   for p in "$WA_CHAT_PORT" "$WA_MEDIA_PORT" "$TG_PORT"; do open_port "$p" tcp; done
-  ok "Порты ${WA_CHAT_PORT}, ${WA_MEDIA_PORT}, ${TG_PORT} открыты"
+  open_port 443 tcp
+  ok "Порты ${WA_CHAT_PORT}, ${WA_MEDIA_PORT}, ${TG_PORT}, 443 открыты"
 
-  step "5/5" "Проверка каскада"
+  step "6/6" "Проверка каскада"
   sleep 3
-  local WA_OK=false TG_OK=false CASCADE_IP=""
+  local WA_OK=false TG_OK=false CASCADE_IP="" CAMO_CODE=""
   nc -z 127.0.0.1 "$WA_CHAT_PORT" -w5 2>/dev/null && WA_OK=true
   nc -z 127.0.0.1 "$TG_PORT"      -w5 2>/dev/null && TG_OK=true
   # сквозная проверка: наружу через каскад должен смотреть IP выходного сервера
   CASCADE_IP=$(curl -s --max-time 15 --socks5-hostname 127.0.0.1:${LP_PROBE} https://api.ipify.org || true)
+  # заглушка: сертификат должен быть валидным, иначе камуфляж не убедителен
+  CAMO_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              "https://${TG_DOMAIN}/" 2>/dev/null || true)
 
   cat > "$STATE_DIR/info.txt" <<EOF
 WhatsApp:  ${WA_DOMAIN}  chat ${WA_CHAT_PORT} / media ${WA_MEDIA_PORT}
@@ -608,6 +811,13 @@ EOF
   echo -e "${BOLD}  ── Telegram ──────────────────────────────────────${NC}"
   $TG_OK && ok "порт слушается" || warn "порт не слушается"
   echo -e "  ${CYAN}https://t.me/proxy?server=${TG_DOMAIN}&port=${TG_PORT}&secret=${TG_SECRET}${NC}"
+  echo ""
+  echo -e "${BOLD}  ── Заглушка :443 ─────────────────────────────────${NC}"
+  if [[ "$CAMO_CODE" == "200" ]]; then
+    ok "отвечает валидным HTTPS — камуфляж fronting-домена работает"
+  else
+    warn "https://${TG_DOMAIN}/ вернул «${CAMO_CODE:-нет ответа}» вместо 200"
+  fi
   echo ""
   echo "  Памятка: ${STATE_DIR}/info.txt"
   echo ""
