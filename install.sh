@@ -510,6 +510,12 @@ STATEEOF
 secret  = "${TG_SECRET}"
 bind-to = "127.0.0.1:${TG_PORT}"
 
+# FakeTLS сверяет метку времени из хендшейка с часами сервера, а часы
+# телефонов легко уходят на десятки секунд. Штатных 3 с не хватает:
+# клиент молча уезжает в domain fronting и Telegram просто не подключается.
+# Защита от replay при этом остаётся включённой.
+tolerate-time-skewness = "${TG_SKEW:-5m}"
+
 [network]
   [network.timeout]
     tcp  = "10s"
