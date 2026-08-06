@@ -214,7 +214,7 @@ install_exit() {
 
   step "2/7" "Xray и ключи REALITY"
   install_xray
-  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
   local xk
   xk=$(xray x25519)
   # у разных версий подписи строк отличаются (Private key / PrivateKey, Public key / Password)
@@ -259,7 +259,7 @@ install_exit() {
   ]
 }
 EOF
-  chmod 600 "$XRAY_DIR/config.json"
+  chown root:nogroup "$XRAY_DIR/config.json"; chmod 640 "$XRAY_DIR/config.json"
   xray run -test -config "$XRAY_DIR/config.json" >/dev/null 2>&1 || err "Конфиг Xray невалиден"
   ok "Xray настроен (слушает :${XRAY_PORT}, маскировка под ${SNI})"
 
@@ -341,8 +341,13 @@ bind-to = "127.0.0.1:${TG_PORT}"
     idle = "3m"
 
 [stats]
-  bind-to = "127.0.0.1:3129"
+  [stats.prometheus]
+    enabled   = true
+    bind-to   = "127.0.0.1:3129"
+    http-path = "/metrics"
 EOF
+  chown root:nogroup "$STATE_DIR/telegram/config.toml"
+  chmod 640 "$STATE_DIR/telegram/config.toml"
   cat > /etc/systemd/system/telegram-proxy.service <<EOF
 [Unit]
 Description=Telegram MTProto Proxy (mtg)
@@ -449,7 +454,7 @@ install_entry() {
 
   step "2/5" "Xray — транспорт до выходного сервера"
   install_xray
-  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  mkdir -p "$STATE_DIR"; chmod 755 "$STATE_DIR"
   cat > "$XRAY_DIR/config.json" <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -496,7 +501,7 @@ install_entry() {
   }
 }
 EOF
-  chmod 600 "$XRAY_DIR/config.json"
+  chown root:nogroup "$XRAY_DIR/config.json"; chmod 640 "$XRAY_DIR/config.json"
   xray run -test -config "$XRAY_DIR/config.json" >/dev/null 2>&1 || err "Конфиг Xray невалиден"
   systemctl daemon-reload
   systemctl enable xray-cascade >/dev/null 2>&1
@@ -609,7 +614,7 @@ EOF
 }
 
 # ══════════════════════════════════════════════════════════════
-clear
+clear 2>/dev/null || true
 echo -e "${BLUE}${BOLD}"
 echo "  ╔══════════════════════════════════════════════╗"
 echo "  ║   Messenger Proxy — каскадный прокси         ║"
